@@ -24,6 +24,7 @@ obj-$(CONFIG_CMD_BDI) += bdinfo.o
 obj-$(CONFIG_CMD_BEDBUG) += bedbug.o
 obj-$(CONFIG_CMD_BIND) += bind.o
 obj-$(CONFIG_CMD_BINOP) += binop.o
+obj-$(CONFIG_CMD_BLOBLIST) += bloblist.o
 obj-$(CONFIG_CMD_BLOCK_CACHE) += blkcache.o
 obj-$(CONFIG_CMD_BMP) += bmp.o
 obj-$(CONFIG_CMD_BOOTCOUNT) += bootcount.o
@@ -196,6 +197,8 @@ obj-$(CONFIG_$(SPL_)CMD_TLV_EEPROM) += tlv_eeprom.o
 
 # core command
 obj-y += nvedit.o
+
+obj-$(CONFIG_CMD_BCM_EXT_UTILS) += broadcom/
 
 obj-$(CONFIG_TI_COMMON_CMD_OPTIONS) += ti/
 
