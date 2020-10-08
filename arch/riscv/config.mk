@@ -14,17 +14,16 @@
 64bit-emul		:= elf64lriscv
 
 ifdef CONFIG_32BIT
-PLATFORM_LDFLAGS	+= -m $(32bit-emul)
+KBUILD_LDFLAGS		+= -m $(32bit-emul)
 EFI_LDS			:= elf_riscv32_efi.lds
 endif
 
 ifdef CONFIG_64BIT
-PLATFORM_LDFLAGS	+= -m $(64bit-emul)
+KBUILD_LDFLAGS		+= -m $(64bit-emul)
 EFI_LDS			:= elf_riscv64_efi.lds
 endif
 
-CONFIG_STANDALONE_LOAD_ADDR = 0x00000000
-LDFLAGS_STANDALONE += -T $(srctree)/examples/standalone/riscv.lds
+CONFIG_STANDALONE_LOAD_ADDR ?= 0x00000000
 
 PLATFORM_CPPFLAGS	+= -ffixed-gp -fpic
 PLATFORM_RELFLAGS	+= -fno-common -gdwarf-2 -ffunction-sections \

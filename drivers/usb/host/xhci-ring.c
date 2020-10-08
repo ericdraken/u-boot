@@ -14,12 +14,15 @@
  */
 
 #include <common.h>
+#include <cpu_func.h>
+#include <log.h>
 #include <asm/byteorder.h>
 #include <usb.h>
 #include <asm/unaligned.h>
+#include <linux/bug.h>
 #include <linux/errno.h>
 
-#include "xhci.h"
+#include <usb/xhci.h>
 
 /**
  * Is this TRB a link TRB or was the last TRB the last TRB in this event ring
@@ -272,7 +275,7 @@ void xhci_queue_command(struct xhci_ctrl *ctrl, u8 *ptr, u32 slot_id,
 			u32 ep_index, trb_type cmd)
 {
 	u32 fields[4];
-	u64 val_64 = (uintptr_t)ptr;
+	u64 val_64 = virt_to_phys(ptr);
 
 	BUG_ON(prepare_ring(ctrl, ctrl->cmd_ring, EP_STATE_RUNNING));
 
@@ -396,7 +399,7 @@ void xhci_acknowledge_event(struct xhci_ctrl *ctrl)
 
 	/* Inform the hardware */
 	xhci_writeq(&ctrl->ir_set->erst_dequeue,
-		(uintptr_t)ctrl->event_ring->dequeue | ERST_EHB);
+		    virt_to_phys(ctrl->event_ring->dequeue) | ERST_EHB);
 }
 
 /**
@@ -574,7 +577,7 @@ int xhci_bulk_tx(struct usb_device *udev, unsigned long pipe,
 	u64 addr;
 	int ret;
 	u32 trb_fields[4];
-	u64 val_64 = (uintptr_t)buffer;
+	u64 val_64 = virt_to_phys(buffer);
 
 	debug("dev=%p, pipe=%lx, buffer=%p, length=%d\n",
 		udev, pipe, buffer, length);
@@ -827,7 +830,7 @@ int xhci_ctrl_tx(struct usb_device *udev, unsigned long pipe,
 		field |= 0x1;
 
 	/* xHCI 1.0 6.4.1.2.1: Transfer Type field */
-	if (HC_VERSION(xhci_readl(&ctrl->hccr->cr_capbase)) == 0x100) {
+	if (HC_VERSION(xhci_readl(&ctrl->hccr->cr_capbase)) >= 0x100) {
 		if (length > 0) {
 			if (req->requesttype & USB_DIR_IN)
 				field |= (TRB_DATA_IN << TRB_TX_TYPE_SHIFT);
@@ -873,7 +876,7 @@ int xhci_ctrl_tx(struct usb_device *udev, unsigned long pipe,
 	if (length > 0) {
 		if (req->requesttype & USB_DIR_IN)
 			field |= TRB_DIR_IN;
-		buf_64 = (uintptr_t)buffer;
+		buf_64 = virt_to_phys(buffer);
 
 		trb_fields[0] = lower_32_bits(buf_64);
 		trb_fields[1] = upper_32_bits(buf_64);

@@ -12,6 +12,7 @@
 #include <common.h>
 #include <display.h>
 #include <dm.h>
+#include <log.h>
 #include <regmap.h>
 #include <video_osd.h>
 #include <asm/gpio.h>
@@ -238,8 +239,8 @@ int ihs_video_out_probe(struct udevice *dev)
 	int res;
 
 	res = regmap_init_mem(dev_ofnode(dev), &priv->map);
-	if (!res) {
-		debug("%s: Could initialize regmap (err = %d)\n", dev->name,
+	if (res) {
+		debug("%s: Could not initialize regmap (err = %d)\n", dev->name,
 		      res);
 		return res;
 	}
@@ -322,7 +323,7 @@ int ihs_video_out_probe(struct udevice *dev)
 	}
 
 	res = display_enable(priv->video_tx, 8, &timing);
-	if (res) {
+	if (res && res != -EIO) { /* Ignore missing DP sink error */
 		debug("%s: Could not enable the display (err = %d)\n",
 		      dev->name, res);
 		return res;

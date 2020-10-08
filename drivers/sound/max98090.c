@@ -11,12 +11,10 @@
 #include <dm.h>
 #include <i2c.h>
 #include <i2s.h>
+#include <log.h>
 #include <sound.h>
 #include <asm/gpio.h>
-#include <asm/io.h>
-#include <asm/arch/clk.h>
-#include <asm/arch/cpu.h>
-#include <asm/arch/power.h>
+#include <linux/delay.h>
 #include "maxim_codec.h"
 #include "max98090.h"
 
@@ -239,9 +237,6 @@ int max98090_device_init(struct maxim_priv *priv)
 {
 	unsigned char id;
 	int error = 0;
-
-	/* Enable codec clock */
-	set_xclkout();
 
 	/* reset the codec, the DSP core, and disable all interrupts */
 	error = max98090_reset(priv);

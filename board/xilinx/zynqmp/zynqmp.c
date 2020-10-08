@@ -5,6 +5,13 @@
  */
 
 #include <common.h>
+#include <command.h>
+#include <cpu_func.h>
+#include <debug_uart.h>
+#include <env.h>
+#include <init.h>
+#include <log.h>
+#include <net.h>
 #include <sata.h>
 #include <ahci.h>
 #include <scsi.h>
@@ -14,20 +21,24 @@
 #include <asm/arch/hardware.h>
 #include <asm/arch/sys_proto.h>
 #include <asm/arch/psu_init_gpl.h>
+#include <asm/cache.h>
 #include <asm/io.h>
+#include <asm/ptrace.h>
 #include <dm/device.h>
 #include <dm/uclass.h>
 #include <usb.h>
 #include <dwc3-uboot.h>
 #include <zynqmppl.h>
-#include <i2c.h>
+#include <zynqmp_firmware.h>
 #include <g_dnl.h>
+#include <linux/bitops.h>
+#include <linux/delay.h>
+#include <linux/sizes.h>
+#include "../common/board.h"
+
+#include "pm_cfg_obj.h"
 
 DECLARE_GLOBAL_DATA_PTR;
-
-#if !defined(CONFIG_SPL_BUILD) && defined(CONFIG_WDT)
-static struct udevice *watchdog_dev;
-#endif
 
 #if defined(CONFIG_FPGA) && defined(CONFIG_FPGA_ZYNQMPPL) && \
     !defined(CONFIG_SPL_BUILD)
@@ -171,69 +182,20 @@ static const struct {
 		.id = 0x62,
 		.name = "29dr",
 	},
+	{
+		.id = 0x66,
+		.name = "39dr",
+	},
+	{
+		.id = 0x7b,
+		.name = "48dr",
+	},
+	{
+		.id = 0x7e,
+		.name = "49dr",
+	},
 };
 #endif
-
-int chip_id(unsigned char id)
-{
-	struct pt_regs regs;
-	int val = -EINVAL;
-
-	if (current_el() != 3) {
-		regs.regs[0] = ZYNQMP_SIP_SVC_CSU_DMA_CHIPID;
-		regs.regs[1] = 0;
-		regs.regs[2] = 0;
-		regs.regs[3] = 0;
-
-		smc_call(&regs);
-
-		/*
-		 * SMC returns:
-		 * regs[0][31:0]  = status of the operation
-		 * regs[0][63:32] = CSU.IDCODE register
-		 * regs[1][31:0]  = CSU.version register
-		 * regs[1][63:32] = CSU.IDCODE2 register
-		 */
-		switch (id) {
-		case IDCODE:
-			regs.regs[0] = upper_32_bits(regs.regs[0]);
-			regs.regs[0] &= ZYNQMP_CSU_IDCODE_DEVICE_CODE_MASK |
-					ZYNQMP_CSU_IDCODE_SVD_MASK;
-			regs.regs[0] >>= ZYNQMP_CSU_IDCODE_SVD_SHIFT;
-			val = regs.regs[0];
-			break;
-		case VERSION:
-			regs.regs[1] = lower_32_bits(regs.regs[1]);
-			regs.regs[1] &= ZYNQMP_CSU_SILICON_VER_MASK;
-			val = regs.regs[1];
-			break;
-		case IDCODE2:
-			regs.regs[1] = lower_32_bits(regs.regs[1]);
-			regs.regs[1] >>= ZYNQMP_CSU_VERSION_EMPTY_SHIFT;
-			val = regs.regs[1];
-			break;
-		default:
-			printf("%s, Invalid Req:0x%x\n", __func__, id);
-		}
-	} else {
-		switch (id) {
-		case IDCODE:
-			val = readl(ZYNQMP_CSU_IDCODE_ADDR);
-			val &= ZYNQMP_CSU_IDCODE_DEVICE_CODE_MASK |
-			       ZYNQMP_CSU_IDCODE_SVD_MASK;
-			val >>= ZYNQMP_CSU_IDCODE_SVD_SHIFT;
-			break;
-		case VERSION:
-			val = readl(ZYNQMP_CSU_VER_ADDR);
-			val &= ZYNQMP_CSU_SILICON_VER_MASK;
-			break;
-		default:
-			printf("%s, Invalid Req:0x%x\n", __func__, id);
-		}
-	}
-
-	return val;
-}
 
 #define ZYNQMP_VERSION_SIZE		9
 #define ZYNQMP_PL_STATUS_BIT		9
@@ -251,9 +213,28 @@ static char *zynqmp_get_silicon_idcode_name(void)
 	u32 i, id, ver, j;
 	char *buf;
 	static char name[ZYNQMP_VERSION_SIZE];
+	u32 ret_payload[PAYLOAD_ARG_CNT];
 
-	id = chip_id(IDCODE);
-	ver = chip_id(IDCODE2);
+	xilinx_pm_request(PM_GET_CHIPID, 0, 0, 0, 0, ret_payload);
+
+	/*
+	 * Firmware returns:
+	 * payload[0][31:0]  = status of the operation
+	 * payload[1]] = IDCODE
+	 * payload[2][19:0]  = Version
+	 * payload[2][28:20] = EXTENDED_IDCODE
+	 * payload[2][29] = PL_INIT
+	 */
+
+	/* Get IDCODE field */
+	id = ret_payload[1];
+	id &= ZYNQMP_CSU_IDCODE_DEVICE_CODE_MASK | ZYNQMP_CSU_IDCODE_SVD_MASK;
+	id >>=	ZYNQMP_CSU_IDCODE_SVD_SHIFT;
+
+	/* Shift silicon version info */
+	ver = ret_payload[2] >> ZYNQMP_CSU_VERSION_EMPTY_SHIFT;
+
+	debug("%s, ID: 0x%0X, Ver: 0x%0X\r\n", __func__, id, ver);
 
 	for (i = 0; i < ARRAY_SIZE(zynqmp_devices); i++) {
 		if (zynqmp_devices[i].id == id) {
@@ -305,84 +286,76 @@ static char *zynqmp_get_silicon_idcode_name(void)
 
 int board_early_init_f(void)
 {
-	int ret = 0;
-#if !defined(CONFIG_SPL_BUILD) && defined(CONFIG_CLK_ZYNQMP)
-	u32 pm_api_version;
-
-	pm_api_version = zynqmp_pmufw_version();
-	printf("PMUFW:\tv%d.%d\n",
-	       pm_api_version >> ZYNQMP_PM_VERSION_MAJOR_SHIFT,
-	       pm_api_version & ZYNQMP_PM_VERSION_MINOR_MASK);
-
-	if (pm_api_version < ZYNQMP_PM_VERSION)
-		panic("PMUFW version error. Expected: v%d.%d\n",
-		      ZYNQMP_PM_VERSION_MAJOR, ZYNQMP_PM_VERSION_MINOR);
-#endif
-
 #if defined(CONFIG_ZYNQMP_PSU_INIT_ENABLED)
+	int ret;
+
 	ret = psu_init();
+	if (ret)
+		return ret;
+
+	/* Delay is required for clocks to be propagated */
+	udelay(1000000);
 #endif
 
-#if defined(CONFIG_WDT) && !defined(CONFIG_SPL_BUILD)
-	/* bss is not cleared at time when watchdog_reset() is called */
-	watchdog_dev = NULL;
-#endif
-
-	return ret;
-}
-
-int board_init(void)
-{
-	printf("EL Level:\tEL%d\n", current_el());
-
-#if defined(CONFIG_FPGA) && defined(CONFIG_FPGA_ZYNQMPPL) && \
-    !defined(CONFIG_SPL_BUILD) || (defined(CONFIG_SPL_FPGA_SUPPORT) && \
-    defined(CONFIG_SPL_BUILD))
-	if (current_el() != 3) {
-		zynqmppl.name = zynqmp_get_silicon_idcode_name();
-		printf("Chip ID:\t%s\n", zynqmppl.name);
-		fpga_init();
-		fpga_add(fpga_xilinx, &zynqmppl);
-	}
-#endif
-
-#if !defined(CONFIG_SPL_BUILD) && defined(CONFIG_WDT)
-	if (uclass_get_device_by_seq(UCLASS_WDT, 0, &watchdog_dev)) {
-		debug("Watchdog: Not found by seq!\n");
-		if (uclass_get_device(UCLASS_WDT, 0, &watchdog_dev)) {
-			puts("Watchdog: Not found!\n");
-			return 0;
-		}
-	}
-
-	wdt_start(watchdog_dev, 0, 0);
-	puts("Watchdog: Started\n");
+#ifdef CONFIG_DEBUG_UART
+	/* Uart debug for sure */
+	debug_uart_init();
+	puts("Debug uart enabled\n"); /* or printch() */
 #endif
 
 	return 0;
 }
 
-#ifdef CONFIG_WATCHDOG
-/* Called by macro WATCHDOG_RESET */
-void watchdog_reset(void)
+static int multi_boot(void)
 {
-# if !defined(CONFIG_SPL_BUILD)
-	static ulong next_reset;
-	ulong now;
+	u32 multiboot;
 
-	if (!watchdog_dev)
-		return;
+	multiboot = readl(&csu_base->multi_boot);
 
-	now = timer_get_us();
+	printf("Multiboot:\t%d\n", multiboot);
 
-	/* Do not reset the watchdog too often */
-	if (now > next_reset) {
-		wdt_reset(watchdog_dev);
-		next_reset = now + 1000;
-	}
-# endif
+	return 0;
 }
+
+#define PS_SYSMON_ANALOG_BUS_VAL	0x3210
+#define PS_SYSMON_ANALOG_BUS_REG	0xFFA50914
+
+int board_init(void)
+{
+#if defined(CONFIG_ZYNQMP_FIRMWARE)
+	struct udevice *dev;
+
+	uclass_get_device_by_name(UCLASS_FIRMWARE, "zynqmp-power", &dev);
+	if (!dev)
+		panic("PMU Firmware device not found - Enable it");
 #endif
+
+#if defined(CONFIG_SPL_BUILD)
+	/* Check *at build time* if the filename is an non-empty string */
+	if (sizeof(CONFIG_ZYNQMP_SPL_PM_CFG_OBJ_FILE) > 1)
+		zynqmp_pmufw_load_config_object(zynqmp_pm_cfg_obj,
+						zynqmp_pm_cfg_obj_size);
+#endif
+
+	printf("EL Level:\tEL%d\n", current_el());
+
+	/* Bug in ROM sets wrong value in this register */
+	writel(PS_SYSMON_ANALOG_BUS_VAL, PS_SYSMON_ANALOG_BUS_REG);
+
+#if defined(CONFIG_FPGA) && defined(CONFIG_FPGA_ZYNQMPPL) && \
+    !defined(CONFIG_SPL_BUILD) || (defined(CONFIG_SPL_FPGA_SUPPORT) && \
+    defined(CONFIG_SPL_BUILD))
+	zynqmppl.name = zynqmp_get_silicon_idcode_name();
+	printf("Chip ID:\t%s\n", zynqmppl.name);
+	fpga_init();
+	fpga_add(fpga_xilinx, &zynqmppl);
+#endif
+
+	if (current_el() == 3)
+		multi_boot();
+
+	return 0;
+}
 
 int board_early_init_r(void)
 {
@@ -409,24 +382,8 @@ int board_early_init_r(void)
 	return 0;
 }
 
-int zynq_board_read_rom_ethaddr(unsigned char *ethaddr)
-{
-#if defined(CONFIG_ZYNQ_GEM_EEPROM_ADDR) && \
-    defined(CONFIG_ZYNQ_GEM_I2C_MAC_OFFSET) && \
-    defined(CONFIG_ZYNQ_EEPROM_BUS)
-	i2c_set_bus_num(CONFIG_ZYNQ_EEPROM_BUS);
-
-	if (eeprom_read(CONFIG_ZYNQ_GEM_EEPROM_ADDR,
-			CONFIG_ZYNQ_GEM_I2C_MAC_OFFSET,
-			ethaddr, 6))
-		printf("I2C EEPROM MAC address read failed\n");
-#endif
-
-	return 0;
-}
-
 unsigned long do_go_exec(ulong (*entry)(int, char * const []), int argc,
-			 char * const argv[])
+			 char *const argv[])
 {
 	int ret = 0;
 
@@ -489,6 +446,7 @@ void reset_cpu(ulong addr)
 {
 }
 
+#if defined(CONFIG_BOARD_LATE_INIT)
 static const struct {
 	u32 bit;
 	const char *name;
@@ -503,18 +461,20 @@ static const struct {
 	{}
 };
 
-static u32 reset_reason(void)
+static int reset_reason(void)
 {
-	u32 ret;
-	int i;
+	u32 reg;
+	int i, ret;
 	const char *reason = NULL;
 
-	ret = readl(&crlapb_base->reset_reason);
+	ret = zynqmp_mmio_read((ulong)&crlapb_base->reset_reason, &reg);
+	if (ret)
+		return -EINVAL;
 
 	puts("Reset reason:\t");
 
 	for (i = 0; i < ARRAY_SIZE(reset_reasons); i++) {
-		if (ret & reset_reasons[i].bit) {
+		if (reg & reset_reasons[i].bit) {
 			reason = reset_reasons[i].name;
 			printf("%s ", reset_reasons[i].name);
 			break;
@@ -525,14 +485,70 @@ static u32 reset_reason(void)
 
 	env_set("reset_reason", reason);
 
-	writel(~0, &crlapb_base->reset_reason);
+	ret = zynqmp_mmio_write((ulong)&crlapb_base->reset_reason, ~0, ~0);
+	if (ret)
+		return -EINVAL;
 
 	return ret;
 }
 
+static int set_fdtfile(void)
+{
+	char *compatible, *fdtfile;
+	const char *suffix = ".dtb";
+	const char *vendor = "xilinx/";
+	int fdt_compat_len;
+
+	if (env_get("fdtfile"))
+		return 0;
+
+	compatible = (char *)fdt_getprop(gd->fdt_blob, 0, "compatible",
+					 &fdt_compat_len);
+	if (compatible && fdt_compat_len) {
+		char *name;
+
+		debug("Compatible: %s\n", compatible);
+
+		name = strchr(compatible, ',');
+		if (!name)
+			return -EINVAL;
+
+		name++;
+
+		fdtfile = calloc(1, strlen(vendor) + strlen(name) +
+				 strlen(suffix) + 1);
+		if (!fdtfile)
+			return -ENOMEM;
+
+		sprintf(fdtfile, "%s%s%s", vendor, name, suffix);
+
+		env_set("fdtfile", fdtfile);
+		free(fdtfile);
+	}
+
+	return 0;
+}
+
+static u8 zynqmp_get_bootmode(void)
+{
+	u8 bootmode;
+	u32 reg = 0;
+	int ret;
+
+	ret = zynqmp_mmio_read((ulong)&crlapb_base->boot_mode, &reg);
+	if (ret)
+		return -EINVAL;
+
+	if (reg >> BOOT_MODE_ALT_SHIFT)
+		reg >>= BOOT_MODE_ALT_SHIFT;
+
+	bootmode = reg & BOOT_MODES_MASK;
+
+	return bootmode;
+}
+
 int board_late_init(void)
 {
-	u32 reg = 0;
 	u8 bootmode;
 	struct udevice *dev;
 	int bootseq = -1;
@@ -552,14 +568,14 @@ int board_late_init(void)
 		return 0;
 	}
 
-	ret = zynqmp_mmio_read((ulong)&crlapb_base->boot_mode, &reg);
+	if (!CONFIG_IS_ENABLED(ENV_VARS_UBOOT_RUNTIME_CONFIG))
+		return 0;
+
+	ret = set_fdtfile();
 	if (ret)
-		return -EINVAL;
+		return ret;
 
-	if (reg >> BOOT_MODE_ALT_SHIFT)
-		reg >>= BOOT_MODE_ALT_SHIFT;
-
-	bootmode = reg & BOOT_MODES_MASK;
+	bootmode = zynqmp_get_bootmode();
 
 	puts("Bootmode: ");
 	switch (bootmode) {
@@ -570,7 +586,7 @@ int board_late_init(void)
 		break;
 	case JTAG_MODE:
 		puts("JTAG_MODE\n");
-		mode = "pxe dhcp";
+		mode = "jtag pxe dhcp";
 		env_set("modeboot", "jtagboot");
 		break;
 	case QSPI_MODE_24BIT:
@@ -581,12 +597,23 @@ int board_late_init(void)
 		break;
 	case EMMC_MODE:
 		puts("EMMC_MODE\n");
-		mode = "mmc0";
-		env_set("modeboot", "emmcboot");
+		if (uclass_get_device_by_name(UCLASS_MMC,
+					      "mmc@ff160000", &dev) &&
+		    uclass_get_device_by_name(UCLASS_MMC,
+					      "sdhci@ff160000", &dev)) {
+			puts("Boot from EMMC but without SD0 enabled!\n");
+			return -1;
+		}
+		debug("mmc0 device found at %p, seq %d\n", dev, dev->seq);
+
+		mode = "mmc";
+		bootseq = dev->seq;
 		break;
 	case SD_MODE:
 		puts("SD_MODE\n");
 		if (uclass_get_device_by_name(UCLASS_MMC,
+					      "mmc@ff160000", &dev) &&
+		    uclass_get_device_by_name(UCLASS_MMC,
 					      "sdhci@ff160000", &dev)) {
 			puts("Boot from SD0 but without SD0 enabled!\n");
 			return -1;
@@ -603,6 +630,8 @@ int board_late_init(void)
 	case SD_MODE1:
 		puts("SD_MODE1\n");
 		if (uclass_get_device_by_name(UCLASS_MMC,
+					      "mmc@ff170000", &dev) &&
+		    uclass_get_device_by_name(UCLASS_MMC,
 					      "sdhci@ff170000", &dev)) {
 			puts("Boot from SD1 but without SD1 enabled!\n");
 			return -1;
@@ -653,8 +682,9 @@ int board_late_init(void)
 
 	reset_reason();
 
-	return 0;
+	return board_late_init_xilinx();
 }
+#endif
 
 int checkboard(void)
 {

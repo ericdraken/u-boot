@@ -5,3 +5,5 @@
 #
 
 obj-y	:= board.o
+obj-$(CONFIG_CMD_VERSAL)	+= cmds.o
+obj-y	+= ../common/board.o

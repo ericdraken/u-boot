@@ -13,12 +13,20 @@
  */
 
 #include <common.h>
+#include <cpu_func.h>
 #include <dm.h>
+#include <log.h>
 #include <net.h>
 #include <netdev.h>
 #include <config.h>
 #include <malloc.h>
+#include <asm/cache.h>
 #include <asm/io.h>
+#include <dm/device_compat.h>
+#include <dm/devres.h>
+#include <linux/bitops.h>
+#include <linux/bug.h>
+#include <linux/delay.h>
 #include <linux/errno.h>
 #include <phy.h>
 #include <miiphy.h>
@@ -27,6 +35,7 @@
 #include <asm/arch/soc.h>
 #include <linux/compat.h>
 #include <linux/mbus.h>
+#include <asm-generic/gpio.h>
 
 DECLARE_GLOBAL_DATA_PTR;
 
@@ -274,6 +283,9 @@ struct mvneta_port {
 	int init;
 	int phyaddr;
 	struct phy_device *phydev;
+#if CONFIG_IS_ENABLED(DM_GPIO)
+	struct gpio_desc phy_reset_gpio;
+#endif
 	struct mii_dev *bus;
 };
 
@@ -1749,6 +1761,17 @@ static int mvneta_probe(struct udevice *dev)
 	if (ret)
 		return ret;
 
+#if CONFIG_IS_ENABLED(DM_GPIO)
+	gpio_request_by_name(dev, "phy-reset-gpios", 0,
+			     &pp->phy_reset_gpio, GPIOD_IS_OUT);
+
+	if (dm_gpio_is_valid(&pp->phy_reset_gpio)) {
+		dm_gpio_set_value(&pp->phy_reset_gpio, 1);
+		mdelay(10);
+		dm_gpio_set_value(&pp->phy_reset_gpio, 0);
+	}
+#endif
+
 	return board_network_enable(bus);
 }
 
@@ -1773,7 +1796,7 @@ static int mvneta_ofdata_to_platdata(struct udevice *dev)
 	struct eth_pdata *pdata = dev_get_platdata(dev);
 	const char *phy_mode;
 
-	pdata->iobase = devfdt_get_addr(dev);
+	pdata->iobase = dev_read_addr(dev);
 
 	/* Get phy-mode / phy_interface from DT */
 	pdata->phy_interface = -1;

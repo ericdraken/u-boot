@@ -9,7 +9,9 @@
 
 #include <common.h>
 #include <console.h>
-#include <environment.h>
+#include <env.h>
+#include <log.h>
+#include <part.h>
 #include <linux/errno.h>
 #include <linux/netdevice.h>
 #include <linux/usb/ch9.h>
@@ -31,7 +33,6 @@
 
 #define USB_NET_NAME "usb_ether"
 
-#define atomic_read
 extern struct platform_data brd;
 
 
@@ -2333,6 +2334,8 @@ fail:
 }
 
 /*-------------------------------------------------------------------------*/
+static void _usb_eth_halt(struct ether_priv *priv);
+
 static int _usb_eth_init(struct ether_priv *priv)
 {
 	struct eth_dev *dev = &priv->ethdev;
@@ -2406,6 +2409,7 @@ static int _usb_eth_init(struct ether_priv *priv)
 	rx_submit(dev, dev->rx_req, 0);
 	return 0;
 fail:
+	_usb_eth_halt(priv);
 	return -1;
 }
 
@@ -2469,8 +2473,7 @@ static int _usb_eth_send(struct ether_priv *priv, void *packet, int length)
 		}
 		usb_gadget_handle_interrupts(0);
 	}
-	if (rndis_pkt)
-		free(rndis_pkt);
+	free(rndis_pkt);
 
 	return 0;
 drop:
@@ -2485,7 +2488,7 @@ static int _usb_eth_recv(struct ether_priv *priv)
 	return 0;
 }
 
-void _usb_eth_halt(struct ether_priv *priv)
+static void _usb_eth_halt(struct ether_priv *priv)
 {
 	struct eth_dev *dev = &priv->ethdev;
 
@@ -2519,7 +2522,7 @@ void _usb_eth_halt(struct ether_priv *priv)
 }
 
 #ifndef CONFIG_DM_ETH
-static int usb_eth_init(struct eth_device *netdev, bd_t *bd)
+static int usb_eth_init(struct eth_device *netdev, struct bd_info *bd)
 {
 	struct ether_priv *priv = (struct ether_priv *)netdev->priv;
 
@@ -2567,7 +2570,7 @@ void usb_eth_halt(struct eth_device *netdev)
 	_usb_eth_halt(priv);
 }
 
-int usb_eth_initialize(bd_t *bi)
+int usb_eth_initialize(struct bd_info *bi)
 {
 	struct eth_device *netdev = &l_priv->netdev;
 
@@ -2579,9 +2582,6 @@ int usb_eth_initialize(bd_t *bi)
 	netdev->halt = usb_eth_halt;
 	netdev->priv = l_priv;
 
-#ifdef CONFIG_MCAST_TFTP
-  #error not supported
-#endif
 	eth_register(netdev);
 	return 0;
 }

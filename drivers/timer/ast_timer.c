@@ -9,6 +9,7 @@
 #include <timer.h>
 #include <asm/io.h>
 #include <asm/arch/timer.h>
+#include <linux/err.h>
 
 #define AST_TICK_TIMER  1
 #define AST_TMC_RELOAD_VAL  0xffffffff
@@ -63,9 +64,9 @@ static int ast_timer_ofdata_to_platdata(struct udevice *dev)
 {
 	struct ast_timer_priv *priv = dev_get_priv(dev);
 
-	priv->regs = devfdt_get_addr_ptr(dev);
-	if (IS_ERR(priv->regs))
-		return PTR_ERR(priv->regs);
+	priv->regs = dev_read_addr_ptr(dev);
+	if (!priv->regs)
+		return -EINVAL;
 
 	priv->tmc = ast_get_timer_counter(priv->regs, AST_TICK_TIMER);
 

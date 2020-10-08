@@ -1,10 +1,17 @@
 #include <common.h>
 #include <dm.h>
-#include <dm/pinctrl.h>
 #include <hwspinlock.h>
+#include <log.h>
+#include <malloc.h>
 #include <asm/arch/gpio.h>
 #include <asm/gpio.h>
 #include <asm/io.h>
+#include <dm/device_compat.h>
+#include <dm/lists.h>
+#include <dm/pinctrl.h>
+#include <linux/bitops.h>
+#include <linux/err.h>
+#include <linux/libfdt.h>
 
 DECLARE_GLOBAL_DATA_PTR;
 
@@ -36,6 +43,17 @@ static const char * const pinmux_mode[PINMUX_MODE_COUNT] = {
 	"analog",
 	"unknown",
 	"alt function",
+};
+
+static const char * const pinmux_output[] = {
+	[STM32_GPIO_PUPD_NO] = "bias-disable",
+	[STM32_GPIO_PUPD_UP] = "bias-pull-up",
+	[STM32_GPIO_PUPD_DOWN] = "bias-pull-down",
+};
+
+static const char * const pinmux_input[] = {
+	[STM32_GPIO_OTYPE_PP] = "drive-push-pull",
+	[STM32_GPIO_OTYPE_OD] = "drive-open-drain",
 };
 
 static int stm32_pinctrl_get_af(struct udevice *dev, unsigned int offset)
@@ -136,7 +154,7 @@ static struct udevice *stm32_pinctrl_get_gpio_dev(struct udevice *dev,
 			 */
 			*idx = stm32_offset_to_index(gpio_bank->gpio_dev,
 						     selector - pin_count);
-			if (*idx < 0)
+			if (IS_ERR_VALUE(*idx))
 				return NULL;
 
 			return gpio_bank->gpio_dev;
@@ -175,10 +193,12 @@ static int stm32_pinctrl_get_pin_muxing(struct udevice *dev,
 					int size)
 {
 	struct udevice *gpio_dev;
+	struct stm32_gpio_priv *priv;
 	const char *label;
 	int mode;
 	int af_num;
 	unsigned int gpio_idx;
+	u32 pupd, otype;
 
 	/* look up for the bank which owns the requested pin */
 	gpio_dev = stm32_pinctrl_get_gpio_dev(dev, selector, &gpio_idx);
@@ -187,9 +207,9 @@ static int stm32_pinctrl_get_pin_muxing(struct udevice *dev,
 		return -ENODEV;
 
 	mode = gpio_get_raw_function(gpio_dev, gpio_idx, &label);
-
 	dev_dbg(dev, "selector = %d gpio_idx = %d mode = %d\n",
 		selector, gpio_idx, mode);
+	priv = dev_get_priv(gpio_dev);
 
 
 	switch (mode) {
@@ -204,9 +224,17 @@ static int stm32_pinctrl_get_pin_muxing(struct udevice *dev,
 		snprintf(buf, size, "%s %d", pinmux_mode[mode], af_num);
 		break;
 	case GPIOF_OUTPUT:
+		pupd = (readl(&priv->regs->pupdr) >> (gpio_idx * 2)) &
+		       PUPD_MASK;
+		snprintf(buf, size, "%s %s %s",
+			 pinmux_mode[mode], pinmux_output[pupd],
+			 label ? label : "");
+		break;
 	case GPIOF_INPUT:
-		snprintf(buf, size, "%s %s",
-			 pinmux_mode[mode], label ? label : "");
+		otype = (readl(&priv->regs->otyper) >> gpio_idx) & OTYPE_MSK;
+		snprintf(buf, size, "%s %s %s",
+			 pinmux_mode[mode], pinmux_input[otype],
+			 label ? label : "");
 		break;
 	}
 
@@ -215,7 +243,7 @@ static int stm32_pinctrl_get_pin_muxing(struct udevice *dev,
 
 #endif
 
-int stm32_pinctrl_probe(struct udevice *dev)
+static int stm32_pinctrl_probe(struct udevice *dev)
 {
 	struct stm32_pinctrl_priv *priv = dev_get_priv(dev);
 	int ret;
@@ -364,6 +392,35 @@ static int stm32_pinctrl_config(int offset)
 	return 0;
 }
 
+static int stm32_pinctrl_bind(struct udevice *dev)
+{
+	ofnode node;
+	const char *name;
+	int ret;
+
+	dev_for_each_subnode(node, dev) {
+		debug("%s: bind %s\n", __func__, ofnode_get_name(node));
+
+		ofnode_get_property(node, "gpio-controller", &ret);
+		if (ret < 0)
+			continue;
+		/* Get the name of each gpio node */
+		name = ofnode_get_name(node);
+		if (!name)
+			return -EINVAL;
+
+		/* Bind each gpio node */
+		ret = device_bind_driver_to_node(dev, "gpio_stm32",
+						 name, node, NULL);
+		if (ret)
+			return ret;
+
+		debug("%s: bind %s\n", __func__, name);
+	}
+
+	return 0;
+}
+
 #if CONFIG_IS_ENABLED(PINCTRL_FULL)
 static int stm32_pinctrl_set_state(struct udevice *dev, struct udevice *config)
 {
@@ -421,6 +478,7 @@ static const struct udevice_id stm32_pinctrl_ids[] = {
 	{ .compatible = "st,stm32f429-pinctrl" },
 	{ .compatible = "st,stm32f469-pinctrl" },
 	{ .compatible = "st,stm32f746-pinctrl" },
+	{ .compatible = "st,stm32f769-pinctrl" },
 	{ .compatible = "st,stm32h743-pinctrl" },
 	{ .compatible = "st,stm32mp157-pinctrl" },
 	{ .compatible = "st,stm32mp157-z-pinctrl" },
@@ -432,7 +490,7 @@ U_BOOT_DRIVER(pinctrl_stm32) = {
 	.id			= UCLASS_PINCTRL,
 	.of_match		= stm32_pinctrl_ids,
 	.ops			= &stm32_pinctrl_ops,
-	.bind			= dm_scan_fdt_dev,
+	.bind			= stm32_pinctrl_bind,
 	.probe			= stm32_pinctrl_probe,
 	.priv_auto_alloc_size	= sizeof(struct stm32_pinctrl_priv),
 };

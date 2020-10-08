@@ -7,6 +7,8 @@
  */
 
 #include <common.h>
+#include <cpu_func.h>
+#include <image.h>
 
 #if !(defined(CONFIG_FIT) && defined(CONFIG_OF_LIBFDT))
 #error "CONFIG_FIT and CONFIG_OF_LIBFDT are required for auto-update feature"
@@ -17,10 +19,12 @@
 #endif
 
 #include <command.h>
+#include <env.h>
 #include <flash.h>
 #include <net.h>
 #include <net/tftp.h>
 #include <malloc.h>
+#include <mapmem.h>
 #include <dfu.h>
 #include <errno.h>
 #include <mtd/cfi_flash.h>
@@ -43,7 +47,6 @@
 
 extern ulong tftp_timeout_ms;
 extern int tftp_timeout_count_max;
-extern ulong load_addr;
 #ifdef CONFIG_MTD_NOR_FLASH
 extern flash_info_t flash_info[];
 static uchar *saved_prot_info;
@@ -70,7 +73,7 @@ static int update_load(char *filename, ulong msec_max, int cnt_max, ulong addr)
 	env_set("netretry", "no");
 
 	/* download the update file */
-	load_addr = addr;
+	image_load_addr = addr;
 	copy_filename(net_boot_file_name, filename, sizeof(net_boot_file_name));
 	size = net_loop(TFTPGET);
 
@@ -278,7 +281,7 @@ int update_tftp(ulong addr, char *interface, char *devstring)
 	}
 
 got_update_file:
-	fit = (void *)addr;
+	fit = map_sysmem(addr, 0);
 
 	if (!fit_check_format((void *)fit)) {
 		printf("Bad FIT format of the update file, aborting "
@@ -307,8 +310,7 @@ got_update_file:
 		printf("\n");
 		if (update_fit_getparams(fit, noffset, &update_addr,
 					&update_fladdr, &update_size)) {
-			printf("Error: can't get update parameteres, "
-								"aborting\n");
+			printf("Error: can't get update parameters, aborting\n");
 			ret = 1;
 			goto next_node;
 		}
